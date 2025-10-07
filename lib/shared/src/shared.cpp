@@ -1,6 +1,6 @@
 #include <shared.h>
-
 SharedState G;
+
 
 static QueueHandle_t sCmdQ = nullptr;
 
