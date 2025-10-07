@@ -1,0 +1,8 @@
+@"
+.pio/
+.vscode/
+.DS_Store
+*.log
+*.tmp
+Thumbs.db
+"@ | Out-File -Encoding utf8 .gitignore
