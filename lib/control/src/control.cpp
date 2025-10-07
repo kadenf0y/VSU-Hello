@@ -7,6 +7,13 @@
 
 static inline float countsToMMHg(uint16_t c) { return 0.4766825f * c - 204.409f; }
 
+// Mode ids (shared.mode stores these ints)
+enum { MODE_FWD = 0, MODE_REV = 1, MODE_BEAT = 2 };
+static inline int nextMode(int m) { return (m == MODE_FWD) ? MODE_REV : (m == MODE_REV) ? MODE_BEAT : MODE_FWD; }
+static inline const char* modeName(int m) {
+  switch (m) { case MODE_FWD: return "FWD"; case MODE_REV: return "REV"; case MODE_BEAT: return "BEAT"; default: return "?"; }
+}
+
 // Fallback: if queue is missing or full, apply command immediately
 static void applyCmdInline(const Cmd& cmd) {
   switch (cmd.type) {
@@ -23,10 +30,11 @@ static void applyCmdInline(const Cmd& cmd) {
       Serial.printf("[CTRL] (inline) SET_POWER_PCT -> %d%%\n", pct);
     } break;
 
-    case CMD_SET_MODE:
-      G.mode.store(cmd.iarg, std::memory_order_relaxed);
-      Serial.printf("[CTRL] (inline) SET_MODE -> %d\n", cmd.iarg);
-      break;
+    case CMD_SET_MODE: {
+      int m = cmd.iarg; if (m < MODE_FWD) m = MODE_FWD; if (m > MODE_BEAT) m = MODE_FWD;
+      G.mode.store(m, std::memory_order_relaxed);
+      Serial.printf("[CTRL] (inline) SET_MODE -> %s(%d)\n", modeName(m), m);
+    } break;
 
     case CMD_SET_BPM:
       G.bpm.store(cmd.farg, std::memory_order_relaxed);
@@ -47,10 +55,17 @@ static void taskControl(void*) {
   uint32_t lastLoopStartUs = micros();
   uint32_t lastPrintMs = millis();
 
-  // Button B long/short timing
+  // --- Button B long/short timing ---
   uint32_t bPressMs = 0;
   bool bLongFired = false;
   const uint32_t LONG_MS = 500;
+
+  // --- A+B combo detection (with short window to avoid false singles) ---
+  bool comboActive = false;
+  bool comboFired  = false;
+  uint32_t comboStartMs = 0;
+  uint32_t lastAPressMs = 0, lastBPressMs = 0;
+  const uint32_t COMBO_WIN_MS = 120;  // if the other button is pressed within this, treat as combo
 
   for (;;) {
     // --- loop timing ---
@@ -63,29 +78,62 @@ static void taskControl(void*) {
     // --- debounced buttons ---
     BtnState ev{};
     buttons_read_debounced(ev);
+    const uint32_t nowMs = millis();
 
-    // A: pressed edge -> toggle pause
-    if (ev.aPressEdge) {
-      Cmd c{ CMD_TOGGLE_PAUSE, 0, 0.0f };
-      if (!shared_cmd_post(c)) applyCmdInline(c);
-    }
+    // record press times
+    if (ev.aPressEdge) lastAPressMs = nowMs;
+    if (ev.bPressEdge) lastBPressMs = nowMs;
 
-    // B: long/short using debounced edges/state
-    if (ev.bPressEdge) { bPressMs = millis(); bLongFired = false; }
-    if (ev.bPressed && !bLongFired) {
-      if (millis() - bPressMs >= LONG_MS) {
-        int cur = G.powerPct.load(std::memory_order_relaxed);
-        int target = cur - 10; if (target < 10) target = 100;
-        Cmd c{ CMD_SET_POWER_PCT, target, 0.0f };
-        if (!shared_cmd_post(c)) applyCmdInline(c);
-        bLongFired = true;
+    // start combo if within window or both already held
+    if (!comboActive) {
+      if ((ev.aPressed && (nowMs - lastBPressMs) <= COMBO_WIN_MS) ||
+          (ev.bPressed && (nowMs - lastAPressMs) <= COMBO_WIN_MS) ||
+          (ev.aPressed && ev.bPressed)) {
+        comboActive = true;
+        comboFired  = false;
+        comboStartMs = nowMs;
+        // cancel any pending long-press flow on B
+        bLongFired = false;
       }
     }
-    if (ev.bReleaseEdge && !bLongFired) {
-      int cur = G.powerPct.load(std::memory_order_relaxed);
-      int target = cur + 10; if (target > 100) target = 10;
-      Cmd c{ CMD_SET_POWER_PCT, target, 0.0f };
-      if (!shared_cmd_post(c)) applyCmdInline(c);
+
+    if (comboActive) {
+      // wait for both released, then cycle mode once
+      if (!ev.aPressed && !ev.bPressed && !comboFired) {
+        int cur = G.mode.load(std::memory_order_relaxed);
+        int nm  = nextMode(cur);
+        Cmd c{ CMD_SET_MODE, nm, 0.0f };
+        if (!shared_cmd_post(c)) applyCmdInline(c);
+        comboFired  = true;
+        comboActive = false;
+      }
+      // while combo active, suppress single-button actions entirely
+    } else {
+      // --- single-button behaviors (only when not in combo) ---
+
+      // A: pressed edge -> toggle pause
+      if (ev.aPressEdge) {
+        Cmd c{ CMD_TOGGLE_PAUSE, 0, 0.0f };
+        if (!shared_cmd_post(c)) applyCmdInline(c);
+      }
+
+      // B: long/short for power nudge
+      if (ev.bPressEdge) { bPressMs = nowMs; bLongFired = false; }
+      if (ev.bPressed && !bLongFired) {
+        if (nowMs - bPressMs >= LONG_MS) {
+          int cur = G.powerPct.load(std::memory_order_relaxed);
+          int target = cur - 10; if (target < 10) target = 100;
+          Cmd c{ CMD_SET_POWER_PCT, target, 0.0f };
+          if (!shared_cmd_post(c)) applyCmdInline(c);
+          bLongFired = true;
+        }
+      }
+      if (ev.bReleaseEdge && !bLongFired) {
+        int cur = G.powerPct.load(std::memory_order_relaxed);
+        int target = cur + 10; if (target > 100) target = 10;
+        Cmd c{ CMD_SET_POWER_PCT, target, 0.0f };
+        if (!shared_cmd_post(c)) applyCmdInline(c);
+      }
     }
 
     // --- consume any queued commands (non-blocking) ---
@@ -105,10 +153,11 @@ static void taskControl(void*) {
           Serial.printf("[CTRL] cmd: SET_POWER_PCT -> %d%%\n", pct);
         } break;
 
-        case CMD_SET_MODE:
-          G.mode.store(cmd.iarg, std::memory_order_relaxed);
-          Serial.printf("[CTRL] cmd: SET_MODE -> %d\n", cmd.iarg);
-          break;
+        case CMD_SET_MODE: {
+          int m = cmd.iarg; if (m < MODE_FWD) m = MODE_FWD; if (m > MODE_BEAT) m = MODE_FWD;
+          G.mode.store(m, std::memory_order_relaxed);
+          Serial.printf("[CTRL] cmd: SET_MODE -> %s(%d)\n", modeName(m), m);
+        } break;
 
         case CMD_SET_BPM:
           G.bpm.store(cmd.farg, std::memory_order_relaxed);
@@ -131,19 +180,19 @@ static void taskControl(void*) {
     G.valve.store(0, std::memory_order_relaxed);
 
     // --- once/sec status line ---
-    uint32_t nowMs = millis();
-    if (nowMs - lastPrintMs >= 1000) {
-      lastPrintMs = nowMs;
+    if (millis() - lastPrintMs >= 1000) {
+      lastPrintMs = millis();
       float hz = 1000.0f / (loopMsEMA > 0 ? loopMsEMA : 1);
-      Serial.printf("[CTRL] Hz=%.1f Ms=%.3f  A=%d B=%d  paused=%d  power=%d%%\n",
+      int m = G.mode.load();
+      Serial.printf("[CTRL] Hz=%.1f Ms=%.3f  A=%d B=%d  paused=%d  power=%d%%  mode=%s(%d)\n",
                     hz, loopMsEMA,
                     ev.aPressed?1:0, ev.bPressed?1:0,
-                    G.paused.load(), G.powerPct.load());
+                    G.paused.load(), G.powerPct.load(), modeName(m), m);
     }
 
     // blink LED ~1 Hz
-    if (nowMs - lastBlinkMs >= 1000) {
-      lastBlinkMs = nowMs;
+    if (millis() - lastBlinkMs >= 1000) {
+      lastBlinkMs = millis();
       led = !led;
       digitalWrite(PIN_LED, led ? HIGH : LOW);
     }
@@ -154,5 +203,7 @@ static void taskControl(void*) {
 
 void control_start_task() {
   // Core 1 = PRO_CPU
-  xTaskCreatePinnedToCore(taskControl, "control", 4096, nullptr, 4, nullptr, 1);
+  Serial.printf("[CTRL] running on core %d\n", xPortGetCoreID());
+  xTaskCreatePinnedToCore(taskControl, "control", 4096, nullptr, 4, nullptr, CONTROL_CORE);
+
 }
