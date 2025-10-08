@@ -1,27 +1,32 @@
 #include <Arduino.h>
 #include "app_config.h"
-#include <io.h>
-#include <control.h>
-#include <buttons.h>
-#include <shared.h>        // <-- make sure this is included
+#include "shared.h"
+#include "io.h"
+#include "buttons.h"
+#include "control.h"
+
+/*
+  Boot sequence:
+  - Bring up serial at high baud for snappy logs
+  - Init shared queue + I/O + buttons
+  - Start the 500 Hz control task on Core 1
+  - Keep loop() idle (we’ll add web server later on Core 0)
+*/
 
 void setup() {
-  Serial.begin(115200);
-  delay(200);
-  Serial.println("\n[HELLO] ESP32 + io + control + buttons + cmdq.");
+  Serial.begin(921600);
+  delay(150);
+  Serial.println("\n[BOOT] VSU-ESP32 starting…");
 
+  shared_init();
   io_init();
   buttons_init();
 
-  shared_cmdq_init();      // <-- CREATE THE QUEUE
-  Serial.printf("[MAIN] cmdq handle = %p\n", (void*)shared_cmdq());
-
+  // Defaults: paused=1, power=30, mode=FWD, bpm=5.0 (set in Shared)
   control_start_task();
 }
 
 void loop() {
-  static uint32_t t = 0;
-  if (millis() - t >= 200) {
-    t = millis();
-  }
+  // Keep idle; control is its own FreeRTOS task.
+  vTaskDelay(pdMS_TO_TICKS(200));
 }

@@ -1,23 +1,26 @@
 #include <Arduino.h>
 #include "app_config.h"
-#include <control.h>
-#include <io.h>
-#include <shared.h>
-#include <buttons.h>
+#include "control.h"
+#include "io.h"
+#include "shared.h"
+#include "buttons.h"
 
+/* === Sensor calibration: 12-bit counts → mmHg
+   From your UNO fit: y = 0.4766825 * counts - 204.409
+   We can revisit after first ESP32 readings.
+*/
 static inline float countsToMMHg(uint16_t c) { return 0.4766825f * c - 204.409f; }
 
-// Modes
+/* === Modes and phases === */
 enum { MODE_FWD = 0, MODE_REV = 1, MODE_BEAT = 2 };
 static inline int nextMode(int m){ return (m==MODE_FWD)?MODE_REV:(m==MODE_REV)?MODE_BEAT:MODE_FWD; }
 static inline const char* modeName(int m){
   switch(m){ case MODE_FWD: return "FWD"; case MODE_REV: return "REV"; case MODE_BEAT: return "BEAT"; default: return "?"; }
 }
 
-// Phases for state machine
 enum Phase { PH_RAMP_UP, PH_HOLD, PH_RAMP_DOWN, PH_DEAD };
 
-// Map power% (10..100) to PWM command [PWM_FLOOR..PWM_MAX]
+/* Map 10..100% → [PWM_FLOOR..PWM_MAX] */
 static inline int pwmFromPowerPct(int pct){
   if (pct < 10) pct = 10; if (pct > 100) pct = 100;
   float x = pct * (1.0f/100.0f);
@@ -27,13 +30,12 @@ static inline int pwmFromPowerPct(int pct){
   return pwm;
 }
 
-// Fallback: apply a command immediately if queue isn’t usable
+/* If posting a command fails (queue not ready/full), apply immediately */
 static void applyCmdInline(const Cmd& cmd) {
   switch (cmd.type) {
     case CMD_TOGGLE_PAUSE: {
       int p = G.paused.load(std::memory_order_relaxed);
-      p = p ? 0 : 1;
-      G.paused.store(p, std::memory_order_relaxed);
+      p = p ? 0 : 1; G.paused.store(p, std::memory_order_relaxed);
       Serial.printf("[CTRL] (inline) TOGGLE_PAUSE -> paused=%d\n", p);
     } break;
     case CMD_SET_POWER_PCT: {
@@ -46,10 +48,11 @@ static void applyCmdInline(const Cmd& cmd) {
       G.mode.store(m, std::memory_order_relaxed);
       Serial.printf("[CTRL] (inline) SET_MODE -> %s(%d)\n", modeName(m), m);
     } break;
-    case CMD_SET_BPM:
-      G.bpm.store(cmd.farg, std::memory_order_relaxed);
-      Serial.printf("[CTRL] (inline) SET_BPM -> %.1f\n", cmd.farg);
-      break;
+    case CMD_SET_BPM: {
+      float v = cmd.farg; if (v < 0.5f) v = 0.5f; if (v > 60.0f) v = 60.0f;
+      G.bpm.store(v, std::memory_order_relaxed);
+      Serial.printf("[CTRL] (inline) SET_BPM -> %.1f\n", v);
+    } break;
   }
 }
 
@@ -58,70 +61,77 @@ static void taskControl(void*) {
   TickType_t wake = xTaskGetTickCount();
 
   pinMode(PIN_LED, OUTPUT);
+  Serial.printf("[CTRL] running on core %d\n", xPortGetCoreID());
+
   bool led = false;
   uint32_t lastBlinkMs = millis();
 
+  // Loop timing EMA
   float loopMsEMA = 1000.0f / CONTROL_HZ;
   uint32_t lastLoopStartUs = micros();
+
+  // Status print throttle
   uint32_t lastPrintMs = millis();
 
-  // --- Button timing / combo ---
+  /* ---- Debounced button processing (A=Pause, B=Power±10%) ---- */
   uint32_t bPressMs = 0; bool bLongFired = false; const uint32_t LONG_MS = 500;
   bool comboActive = false, comboFired = false;
-  uint32_t comboStartMs = 0, lastAPressMs = 0, lastBPressMs = 0;
+  uint32_t lastAPressMs = 0, lastBPressMs = 0;
   const uint32_t COMBO_WIN_MS = 120;
 
-  // --- Control state machine vars ---
+  /* ---- Control state ---- */
   Phase phase = PH_RAMP_UP;
-  bool dirForward = true;             // current valve direction
-  bool wantForward = true;            // desired direction from mode
+  bool dirForward = true;     // actual valve direction
+  bool wantForward = true;    // desired direction from mode
   uint32_t phaseStartMs = millis();
-  float pwmCmd = 0.0f;                // commanded PWM (float for slopes)
+  float pwmCmd = 0.0f;        // float for smooth slope integration
   int   targetPWM = pwmFromPowerPct(G.powerPct.load());
-  float beat_hold_ms = 0.0f;          // dwell in HOLD per half-cycle
-  int   lastModeSeen = G.mode.load();
+
+  float beat_hold_ms = 0.0f;  // hold budget per half-cycle in BEAT
+  int   lastModeSeen  = G.mode.load();
   int   lastPowerSeen = G.powerPct.load();
-  float lastBpmSeen = G.bpm.load();
+  float lastBpmSeen   = G.bpm.load();
 
   auto recomputeBeatBudget = [&](){
+    // Half-cycle length (ms) from BPM
     float bpm = G.bpm.load();
     if (bpm < 0.5f) bpm = 0.5f; if (bpm > 60.0f) bpm = 60.0f;
-    float Th_ms = (60.0f / bpm) * 1000.0f * 0.5f;  // half-cycle ms
+    float Th_ms = (60.0f / bpm) * 1000.0f * 0.5f;
+
+    // Time to ramp up/down by slope
     float tUp_ms   = (targetPWM - PWM_FLOOR) / PWM_SLOPE_UP   * 1000.0f;
     float tDown_ms = (targetPWM - PWM_FLOOR) / PWM_SLOPE_DOWN * 1000.0f;
-    float tDead    = (float)DEADTIME_MS;
-    float tHold = Th_ms - (tUp_ms + tDown_ms + tDead);
+
+    // Remaining time is hold (clip to >=0), minus a fixed deadtime
+    float tHold = Th_ms - (tUp_ms + tDown_ms + (float)DEADTIME_MS);
     if (tHold < 0) tHold = 0;
     beat_hold_ms = tHold;
   };
 
-  Serial.printf("[CTRL] running on core %d\n", xPortGetCoreID());
-
   for (;;) {
-    // --- loop timing ---
+    /* --- Loop timing --- */
     uint32_t nowUs = micros();
     float dtMs = (nowUs - lastLoopStartUs) * 0.001f;
     lastLoopStartUs = nowUs;
     loopMsEMA = loopMsEMA * 0.9f + dtMs * 0.1f;
     G.loopMs.store(loopMsEMA, std::memory_order_relaxed);
 
-    // --- debounced buttons ---
+    /* --- Read buttons (debounced) --- */
     BtnState ev{}; buttons_read_debounced(ev);
     const uint32_t nowMs = millis();
 
     if (ev.aPressEdge) lastAPressMs = nowMs;
     if (ev.bPressEdge) lastBPressMs = nowMs;
 
-    // Combo detect
+    // A+B combo -> cycle mode once
     if (!comboActive) {
       if ((ev.aPressed && (nowMs - lastBPressMs) <= COMBO_WIN_MS) ||
           (ev.bPressed && (nowMs - lastAPressMs) <= COMBO_WIN_MS) ||
           (ev.aPressed && ev.bPressed)) {
-        comboActive = true; comboFired = false; comboStartMs = nowMs;
-        bLongFired = false; // cancel B long
+        comboActive = true; comboFired = false;
+        bLongFired = false; // cancel long if combo
       }
     }
-
     if (comboActive) {
       if (!ev.aPressed && !ev.bPressed && !comboFired) {
         int cur = G.mode.load(std::memory_order_relaxed);
@@ -132,12 +142,11 @@ static void taskControl(void*) {
         comboActive = false;
       }
     } else {
-      // Singles
+      // Single-button actions
       if (ev.aPressEdge) {
         Cmd c{ CMD_TOGGLE_PAUSE, 0, 0.0f };
         if (!shared_cmd_post(c)) applyCmdInline(c);
       }
-
       if (ev.bPressEdge) { bPressMs = nowMs; bLongFired = false; }
       if (ev.bPressed && !bLongFired) {
         if (nowMs - bPressMs >= LONG_MS) {
@@ -156,9 +165,9 @@ static void taskControl(void*) {
       }
     }
 
-    // --- consume commands (non-blocking) ---
+    /* --- Consume pending commands from other core (future web) --- */
     Cmd cmd;
-    bool modeChanged = false, powerChanged = false, bpmChanged = false;
+    bool modeChanged=false, powerChanged=false, bpmChanged=false;
     while (shared_cmdq() && xQueueReceive(shared_cmdq(), &cmd, 0) == pdTRUE) {
       switch (cmd.type) {
         case CMD_TOGGLE_PAUSE: {
@@ -179,24 +188,21 @@ static void taskControl(void*) {
           modeChanged = true;
         } break;
         case CMD_SET_BPM: {
-          float bpm = cmd.farg; if (bpm < 0.5f) bpm = 0.5f; if (bpm > 60.0f) bpm = 60.0f;
-          G.bpm.store(bpm, std::memory_order_relaxed);
-          Serial.printf("[CTRL] cmd: SET_BPM -> %.1f\n", bpm);
+          float v = cmd.farg; if (v < 0.5f) v = 0.5f; if (v > 60.0f) v = 60.0f;
+          G.bpm.store(v, std::memory_order_relaxed);
+          Serial.printf("[CTRL] cmd: SET_BPM -> %.1f\n", v);
           bpmChanged = true;
         } break;
       }
     }
 
-    // --- update control phase machine (dry-run unless ENABLE_OUTPUTS=1) ---
+    /* --- State machine updates --- */
     const bool paused = G.paused.load() != 0;
     const int  mode   = G.mode.load();
     const int  power  = G.powerPct.load();
-    const float bpm   = G.bpm.load();
 
-    // desired direction from mode (BEAT toggles later)
     wantForward = (mode != MODE_REV);
 
-    // recompute target PWM if power changed
     if (powerChanged || power != lastPowerSeen) {
       targetPWM = paused ? 0 : pwmFromPowerPct(power);
       if (mode == MODE_BEAT) recomputeBeatBudget();
@@ -204,27 +210,22 @@ static void taskControl(void*) {
     }
 
     if (modeChanged || mode != lastModeSeen) {
-      // entering a new mode → interlock sequence: ramp down → deadtime → set direction → ramp up
       lastModeSeen = mode;
-      if (mode == MODE_BEAT) { // reset for beat
-        dirForward = true;
-        phase = PH_RAMP_UP;
-        phaseStartMs = nowMs;
+      if (mode == MODE_BEAT) {
+        dirForward = true; phase = PH_RAMP_UP; phaseStartMs = nowMs;
         targetPWM = paused ? 0 : pwmFromPowerPct(power);
         recomputeBeatBudget();
-      } else { // FWD/REV: enforce desired direction
-        // start ramp-down if direction needs changing
+      } else {
         phase = (wantForward == dirForward) ? PH_RAMP_UP : PH_RAMP_DOWN;
         phaseStartMs = nowMs;
       }
     }
 
-    if (bpmChanged || bpm != lastBpmSeen) {
+    if (bpmChanged) {
       if (mode == MODE_BEAT) recomputeBeatBudget();
-      lastBpmSeen = bpm;
+      lastBpmSeen = G.bpm.load();
     }
 
-    // paused → force PWM=0, valve off (safe)
     if (paused) {
       pwmCmd = 0.0f;
       G.pwm.store(0, std::memory_order_relaxed);
@@ -234,69 +235,54 @@ static void taskControl(void*) {
       io_valve_write(false);
     #endif
     } else {
-      // update phase by mode
       if (mode == MODE_FWD || mode == MODE_REV) {
-        // if direction differs, do ramp-down → dead → ramp-up
         if ((wantForward != dirForward) && (phase != PH_RAMP_DOWN && phase != PH_DEAD)) {
-          phase = PH_RAMP_DOWN;
-          phaseStartMs = nowMs;
+          phase = PH_RAMP_DOWN; phaseStartMs = nowMs;
         }
-
         switch (phase) {
-          case PH_RAMP_UP: {
+          case PH_RAMP_UP:
             if (pwmCmd < PWM_FLOOR) pwmCmd = PWM_FLOOR;
             pwmCmd += PWM_SLOPE_UP * (dtMs * 0.001f);
             if (pwmCmd >= targetPWM) { pwmCmd = (float)targetPWM; phase = PH_HOLD; phaseStartMs = nowMs; }
-          } break;
-          case PH_HOLD: {
-            // if target changed materially, adjust
-            if (pwmCmd < targetPWM - 0.5f) { phase = PH_RAMP_UP; }
-            else if (pwmCmd > targetPWM + 0.5f) { phase = PH_RAMP_DOWN; }
-          } break;
-          case PH_RAMP_DOWN: {
-            pwmCmd -= PWM_SLOPE_DOWN * (dtMs * 0.001f);
-            if (pwmCmd <= PWM_FLOOR) {
-              pwmCmd = 0.0f; phase = PH_DEAD; phaseStartMs = nowMs;
-            }
-          } break;
-          case PH_DEAD: {
-            if ((nowMs - phaseStartMs) >= DEADTIME_MS) {
-              dirForward = wantForward;
-              phase = PH_RAMP_UP; phaseStartMs = nowMs;
-            }
-          } break;
-        }
-      } else { // MODE_BEAT
-        // trapezoid each half-cycle: up -> hold -> down -> dead -> flip dir
-        switch (phase) {
-          case PH_RAMP_UP: {
-            // set valve to current direction
-            // (we publish valve below every tick)
-            if (pwmCmd < PWM_FLOOR) pwmCmd = PWM_FLOOR;
-            pwmCmd += PWM_SLOPE_UP * (dtMs * 0.001f);
-            if (pwmCmd >= targetPWM) { pwmCmd = (float)targetPWM; phase = PH_HOLD; phaseStartMs = nowMs; }
-          } break;
-          case PH_HOLD: {
-            if ((nowMs - phaseStartMs) >= (uint32_t)beat_hold_ms) {
-              phase = PH_RAMP_DOWN; phaseStartMs = nowMs;
-            }
-          } break;
-          case PH_RAMP_DOWN: {
+            break;
+          case PH_HOLD:
+            if (pwmCmd < targetPWM - 0.5f)      phase = PH_RAMP_UP;
+            else if (pwmCmd > targetPWM + 0.5f) phase = PH_RAMP_DOWN;
+            break;
+          case PH_RAMP_DOWN:
             pwmCmd -= PWM_SLOPE_DOWN * (dtMs * 0.001f);
             if (pwmCmd <= PWM_FLOOR) { pwmCmd = 0.0f; phase = PH_DEAD; phaseStartMs = nowMs; }
-          } break;
-          case PH_DEAD: {
+            break;
+          case PH_DEAD:
             if ((nowMs - phaseStartMs) >= DEADTIME_MS) {
-              dirForward = !dirForward;              // toggle on each half-cycle
-              phase = PH_RAMP_UP; phaseStartMs = nowMs;
-              // recompute budget in case power/BPM changed mid-cycle
-              recomputeBeatBudget();
+              dirForward = wantForward; phase = PH_RAMP_UP; phaseStartMs = nowMs;
             }
-          } break;
+            break;
+        }
+      } else { // MODE_BEAT
+        switch (phase) {
+          case PH_RAMP_UP:
+            if (pwmCmd < PWM_FLOOR) pwmCmd = PWM_FLOOR;
+            pwmCmd += PWM_SLOPE_UP * (dtMs * 0.001f);
+            if (pwmCmd >= targetPWM) { pwmCmd = (float)targetPWM; phase = PH_HOLD; phaseStartMs = nowMs; }
+            break;
+          case PH_HOLD:
+            if ((nowMs - phaseStartMs) >= (uint32_t)beat_hold_ms) { phase = PH_RAMP_DOWN; phaseStartMs = nowMs; }
+            break;
+          case PH_RAMP_DOWN:
+            pwmCmd -= PWM_SLOPE_DOWN * (dtMs * 0.001f);
+            if (pwmCmd <= PWM_FLOOR) { pwmCmd = 0.0f; phase = PH_DEAD; phaseStartMs = nowMs; }
+            break;
+          case PH_DEAD:
+            if ((nowMs - phaseStartMs) >= DEADTIME_MS) {
+              dirForward = !dirForward; phase = PH_RAMP_UP; phaseStartMs = nowMs;
+              recomputeBeatBudget(); // catch mid-cycle changes to power/BPM
+            }
+            break;
         }
       }
 
-      // publish and (optionally) actuate
+      // Publish + (optionally) actuate
       int outPWM = (int)roundf(pwmCmd);
       if (outPWM < 0) outPWM = 0; if (outPWM > PWM_MAX) outPWM = PWM_MAX;
       G.pwm.store((unsigned)outPWM, std::memory_order_relaxed);
@@ -308,37 +294,34 @@ static void taskControl(void*) {
     #endif
     }
 
-    // --- sensors (unchanged, safe) ---
+    /* --- Sensors (we’ll smooth on the browser) --- */
     uint16_t rVent = io_adc_read_vent();
     uint16_t rAtr  = io_adc_read_atr();
-    float v_mm = countsToMMHg(rVent);
-    float a_mm = countsToMMHg(rAtr);
-    G.vent_mmHg.store(v_mm, std::memory_order_relaxed);
-    G.atr_mmHg.store(a_mm,  std::memory_order_relaxed);
-    G.flow_ml_min.store(0.0f, std::memory_order_relaxed);
+    G.vent_mmHg.store(countsToMMHg(rVent), std::memory_order_relaxed);
+    G.atr_mmHg.store (countsToMMHg(rAtr),  std::memory_order_relaxed);
+    G.flow_ml_min.store(0.0f, std::memory_order_relaxed); // stub
 
-    // --- once/sec status line ---
-    if (millis() - lastPrintMs >= 1000) {
-      lastPrintMs = millis();
+    /* --- Status prints --- */
+    if (millis() - lastPrintMs >= STATUS_MS) {
+      lastPrintMs = nowMs;
       float hz = 1000.0f / (loopMsEMA > 0 ? loopMsEMA : 1);
-      int m = G.mode.load();
       const char* ph = (phase==PH_RAMP_UP)?"UP":(phase==PH_HOLD)?"HOLD":(phase==PH_RAMP_DOWN)?"DOWN":"DEAD";
-      Serial.printf("[CTRL] Hz=%.1f Ms=%.3f paused=%d mode=%s dir=%s phase=%s pwm=%3u tgt=%3d bpm=%.1f hold=%.0fms\n",
-                    hz, loopMsEMA,
-                    G.paused.load(), modeName(m),
+      Serial.printf("[CTRL] Hz=%.1f  A=%d B=%d  paused=%d  mode=%s  dir=%s  phase=%s  pwm=%3u tgt=%3d bpm=%.1f hold=%.0fms\n",
+                    hz,
+                    (int)ev.aPressed, (int)ev.bPressed,
+                    G.paused.load(), modeName(lastModeSeen),
                     dirForward?"FWD":"REV", ph,
                     G.pwm.load(), targetPWM, G.bpm.load(), beat_hold_ms);
     }
 
-    // blink LED ~1 Hz
-    if (millis() - lastBlinkMs >= 1000) {
-      lastBlinkMs = millis(); led = !led; digitalWrite(PIN_LED, led ? HIGH : LOW);
-    }
+    // Blink LED ~1 Hz (liveness)
+    if (millis() - lastBlinkMs >= 1000) { lastBlinkMs = nowMs; led = !led; digitalWrite(PIN_LED, led ? HIGH : LOW); }
 
     vTaskDelayUntil(&wake, period);
   }
 }
 
 void control_start_task() {
+  // Pin the control task to Core 1 (APP core)
   xTaskCreatePinnedToCore(taskControl, "control", 6144, nullptr, 4, nullptr, CONTROL_CORE);
 }

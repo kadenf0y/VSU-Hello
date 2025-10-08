@@ -1,2 +1,3 @@
 #pragma once
-void control_start_task();   // spawns a FreeRTOS task on Core 1
+// Starts the 500 Hz control task pinned to CONTROL_CORE
+void control_start_task();

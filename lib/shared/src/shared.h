@@ -1,40 +1,55 @@
 #pragma once
+#include <Arduino.h>
 #include <atomic>
-#include "app_config.h"
-extern "C" {
-  #include "freertos/FreeRTOS.h"
-  #include "freertos/queue.h"
-}
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
-// ---- command types ----
+/*
+  Shared state & command queue, safe across cores/tasks.
+  - Atomics for sampled telemetry + current commands.
+  - FreeRTOS queue for discrete command messages.
+*/
+
 enum CmdType : uint8_t {
-  CMD_TOGGLE_PAUSE = 0,
-  CMD_SET_MODE     = 1,   // arg: iarg = 0=fwd,1=rev,2=beat
-  CMD_SET_POWER_PCT= 2,   // arg: iarg = 10..100 (ABSOLUTE target)
-  CMD_SET_BPM      = 3
+  CMD_TOGGLE_PAUSE = 1,
+  CMD_SET_POWER_PCT,
+  CMD_SET_MODE,
+  CMD_SET_BPM
 };
 
-struct Cmd { CmdType type; int32_t iarg; float farg; };
+struct Cmd {
+  CmdType type;
+  int     iarg;    // int payload (power pct, mode)
+  float   farg;    // float payload (BPM)
+};
 
-// queue API
-void          shared_cmdq_init();
+struct Shared {
+  // Commands / params
+  std::atomic<int>    paused{1};          // 1=paused, 0=running
+  std::atomic<int>    powerPct{30};       // 10..100 (maps to PWM_FLOOR..PWM_MAX)
+  std::atomic<int>    mode{0};            // 0=FWD, 1=REV, 2=BEAT
+  std::atomic<float>  bpm{5.0f};          // trapezoid half-cycle rate
+
+  // Outputs we compute
+  std::atomic<unsigned> pwm{0};           // 0..255
+  std::atomic<unsigned> valve{0};         // 1=forward, 0=reverse
+
+  // Telemetry (smoothed in browser later)
+  std::atomic<float>  vent_mmHg{0.0f};
+  std::atomic<float>  atr_mmHg{0.0f};
+  std::atomic<float>  flow_ml_min{0.0f};
+
+  // Control-loop performance
+  std::atomic<float>  loopMs{2.0f};       // EMA of loop time in ms
+};
+
+extern Shared G;
+
+// Init queue + atomics (call once at boot)
+void shared_init();
+
+// Get the underlying command queue
 QueueHandle_t shared_cmdq();
+
+// Post a command (non-blocking, returns false if queue full/uninit)
 bool          shared_cmd_post(const Cmd& c);
-
-// ---- telemetry/control state ----
-struct SharedState {
-  std::atomic<float>   vent_mmHg{0};
-  std::atomic<float>   atr_mmHg{0};
-  std::atomic<float>   flow_ml_min{0};
-
-  std::atomic<unsigned> pwm{0};     // instantaneous PWM (0..255), for telemetry
-  std::atomic<unsigned> valve{0};   // 0/1
-
-  std::atomic<int>     mode{0};     // 0=fwd,1=rev,2=beat (placeholder)
-  std::atomic<int>     paused{0};   // 0=run,1=paused
-  std::atomic<int>     powerPct{100}; // 10..100, shared global
-  std::atomic<float>   bpm{5.0f};     // default 5 as you wanted
-  std::atomic<float>   loopMs{0};
-};
-
-extern SharedState G;

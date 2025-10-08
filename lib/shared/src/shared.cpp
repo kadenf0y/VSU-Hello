@@ -1,18 +1,15 @@
-#include <shared.h>
-SharedState G;
+#include "shared.h"
 
+static QueueHandle_t g_cmdq = nullptr;
+Shared G;
 
-static QueueHandle_t sCmdQ = nullptr;
-
-void shared_cmdq_init() {
-  if (!sCmdQ) {
-    sCmdQ = xQueueCreate(8, sizeof(Cmd)); // small, fast queue
-  }
+void shared_init() {
+  if (!g_cmdq) g_cmdq = xQueueCreate(8, sizeof(Cmd));  // small, fast queue
 }
 
-QueueHandle_t shared_cmdq() { return sCmdQ; }
+QueueHandle_t shared_cmdq() { return g_cmdq; }
 
 bool shared_cmd_post(const Cmd& c) {
-  if (!sCmdQ) return false;
-  return xQueueSend(sCmdQ, &c, 0) == pdPASS;  // non-blocking
+  if (!g_cmdq) return false;
+  return xQueueSend(g_cmdq, &c, 0) == pdTRUE;
 }

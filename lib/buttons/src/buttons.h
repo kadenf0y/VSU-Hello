@@ -2,22 +2,21 @@
 #include <Arduino.h>
 #include "app_config.h"
 
-// Call once at boot
+// Debounced, edge-aware button reader for two buttons.
+
 void buttons_init();
 
-// Debounced snapshot + one-shot edges (reset each call)
 struct BtnState {
-  bool aPressed;
-  bool bPressed;
-  bool aPressEdge;
-  bool aReleaseEdge;
+  bool aPressed;      // true while A physically held
+  bool bPressed;      // true while B physically held
+  bool aPressEdge;    // one-shot true exactly on release->press
+  bool aReleaseEdge;  // one-shot true exactly on press->release
   bool bPressEdge;
   bool bReleaseEdge;
 };
 
-// Call once per control loop iteration (or as often as you like).
-// Edges are true only on the call where the debounced transition occurs.
+// Call this from your control loop (500 Hz is fine).
 void buttons_read_debounced(BtnState &out);
 
-// Optional one-shot debug print (raw pin levels)
+// Optional: print raw pin levels once for debugging wiring.
 void buttons_debug_print();
