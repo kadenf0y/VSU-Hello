@@ -24,10 +24,19 @@
 #define USE_TEST_BUTTON_PINS 1
 #endif
 
-// Core IDs (ESP32): 0=PRO_CPU (WiFi stack), 1=APP_CPU (Arduino loop)
+// ========= Actuation safety =========
+#ifndef ENABLE_OUTPUTS
+#define ENABLE_OUTPUTS 1     // 0=dry-run (no hardware writes), 1=drive hardware
+#endif
+
+// ========= Ramp/deadtime tuning =========
+#define PWM_SLOPE_UP     350.0f   // PWM counts per second (up)
+#define PWM_SLOPE_DOWN   350.0f   // PWM counts per second (down)
+#define DEADTIME_MS      100      // ms with PWM=0 between direction changes
+
+// ========= Cores (docs) =========
+// 0=PRO (Wi-Fi), 1=APP (Arduino)
 #define CORE_PRO 0
 #define CORE_APP 1
-
-// Where we run things:
-#define CONTROL_CORE CORE_APP   // 1
-#define WEB_CORE     CORE_PRO   // 0
+#define CONTROL_CORE CORE_APP
+#define WEB_CORE     CORE_PRO

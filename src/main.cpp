@@ -21,8 +21,7 @@ void setup() {
 
 void loop() {
   static uint32_t t = 0;
-  if (millis() - t >= 1000) {
+  if (millis() - t >= 200) {
     t = millis();
-    Serial.println("[HELLO] tick");
   }
 }
