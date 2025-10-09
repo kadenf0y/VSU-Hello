@@ -40,7 +40,7 @@
   Set to 1 once wiring is verified and you’re ready to move actuators.
 */
 #ifndef ENABLE_OUTPUTS
-#define ENABLE_OUTPUTS   0
+#define ENABLE_OUTPUTS   1
 #endif
 
 /*

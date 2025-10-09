@@ -13,71 +13,120 @@ static AsyncWebServer server(80);
 static AsyncEventSource sse("/stream");
 
 // ====== Minimal dark UI (you’ll recognize the vibe; charts later) ======
-static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
+static const char INDEX_HTML[] PROGMEM = R"HTML(
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>VSU ESP32 Monitor</title>
 <style>
   :root{
     --bg:#0f1317; --panel:#151a20; --ink:#e6edf3; --muted:#9aa7b2; --grid:#26303a;
     --cyan:#0ea5e9; --red:#ef4444; --amber:#f59e0b; --green:#22c55e; --violet:#a78bfa;
+    --gap:10px;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
+  /* Kill page scroll & accidental horiz overflow */
+  html,body{overflow:hidden}
   body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,Segoe UI,Roboto,Arial}
 
-  /* Top status bar */
-  .top{display:flex;gap:10px;align-items:center;padding:8px 12px;background:#0c1014;border-bottom:1px solid var(--grid)}
-  .pill{font-size:12px;color:var(--muted);border:1px solid var(--grid);border-radius:999px;padding:3px 10px}
+  /* Top status bar (compact) */
+  .top{display:flex;gap:8px;align-items:center;padding:6px 10px;background:#0c1014;border-bottom:1px solid var(--grid)}
+  .pill{font-size:12px;color:var(--muted);border:1px solid var(--grid);border-radius:999px;padding:2px 8px;white-space:nowrap}
   .pill b{color:var(--ink)}
 
-  /* Main 3-column grid */
-  .main{display:grid;gap:12px;padding:12px;grid-template-columns:1fr 120px 280px}
-  .col{display:flex;flex-direction:column;gap:10px}
-  .card{background:var(--panel);border:1px solid var(--grid);border-radius:12px;padding:10px}
+  /* Main grid fills viewport height (set by JS), never wider than viewport */
+  .main{
+    display:grid;gap:12px;padding:10px;
+    grid-template-columns:minmax(320px,1fr) minmax(96px,120px) minmax(240px,280px);
+    max-width:100vw;  /* prevent rogue horizontal growth */
+    height:calc(100vh - 40px); /* fallback; JS will refine */
+  }
 
-  /* Left column: strip cards */
-  .strip{padding:0;overflow:hidden}
-  .stripHead{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--grid);background:#0c1116}
-  .canvasWrap{height:110px;background:#0b0f13}
-  canvas{display:block;width:100%;height:100%}
-  .legend{display:flex;gap:12px;align-items:center;font-size:12px;color:var(--muted);padding:6px 10px;border-top:1px solid var(--grid);background:#0c1116}
-  .sw{width:16px;height:4px;border-radius:2px;background:var(--muted)}
+  /* Left: 5 equal rows */
+  .leftgrid{
+    display:grid;grid-template-rows:repeat(5,1fr);gap:var(--gap);min-height:0;
+  }
+  .strip{
+    display:grid;grid-template-rows:auto 1fr auto;gap:0;
+    background:var(--panel);border:1px solid var(--grid);border-radius:12px;overflow:hidden;min-height:0;
+  }
+  .stripHead{display:flex;justify-content:space-between;align-items:center;
+    padding:4px 8px;color:var(--muted);font-size:11px;border-bottom:1px solid var(--grid);background:#0c1116}
+  .canvasWrap{min-height:0}
+  canvas{display:block;width:100%;height:100%;background:#0b0f13}
+  .legend{display:flex;gap:10px;align-items:center;font-size:11px;color:var(--muted);
+    padding:4px 8px;border-top:1px solid var(--grid);background:#0c1116}
+  .sw{width:14px;height:3px;border-radius:2px;background:var(--muted)}
 
-  /* Middle column: live numerics aligned to rows */
-  .bigNum{display:flex;align-items:center;justify-content:center;height:110px;background:#0b0f13;border:1px solid var(--grid);border-radius:10px;font-weight:800}
-  .bigNum .val{font-size:28px}
-  .bigNum .unit{font-size:12px;color:var(--muted);margin-left:6px}
+  /* Middle: 5 equal rows; tile height matches canvas row height */
+  .midgrid{
+    display:grid;grid-template-rows:repeat(5,1fr);gap:var(--gap);min-height:0;
+  }
+  .bigNum{
+    display:flex;align-items:center;justify-content:center;height:100%;
+    background:#0b0f13;border:1px solid var(--grid);border-radius:10px;min-height:0
+  }
+  .numStack{display:flex;flex-direction:column;align-items:center;line-height:1}
+  .numStack .val{font-weight:900;letter-spacing:.02em;font-size:clamp(18px,3.4vh,28px)}
+  .numStack .unit{font-size:11px;color:var(--muted);margin-top:4px}
+  .t-cyan .val{color:var(--cyan)}
+  .t-red .val{color:var(--red)}
+  .t-amber .val{color:var(--amber)}
+  .t-green .val{color:var(--green)}
+  .t-violet .val{color:var(--violet)}
 
-  /* Right column: controls */
-  .controls .group{border:1px solid var(--grid);border-radius:10px;padding:10px;background:#0b0f13}
-  .controls h3{margin:0 0 8px 0;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
-  .bp{display:flex;align-items:baseline;gap:10px}
-  .bp .main{font-weight:900;font-size:44px;letter-spacing:.02em}
+  /* Right: controls column — compact & scrollable if truly needed */
+  .controls{display:flex;flex-direction:column;gap:8px;min-height:0;overflow:auto}
+  .group{border:1px solid var(--grid);border-radius:10px;padding:8px;background:#0b0f13}
+  .controls h3{margin:0 0 6px 0;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+
+  .bp{display:flex;align-items:baseline;gap:8px}
+  .bp .main{font-weight:900;font-size:38px;letter-spacing:.02em}
   .bp .unit{color:var(--muted);font-size:12px}
-  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  input[type="range"]{width:100%}
-  select,button{background:#0f1317;color:var(--ink);border:1px solid var(--grid);border-radius:8px;padding:6px 10px;cursor:pointer}
+
+  /* Vertical steppers */
+  .stepper{display:grid;grid-template-rows:auto 1fr auto;align-items:center;justify-items:center;gap:6px;min-height:0}
+  .stepper .btn{width:100%;padding:8px;border:1px solid var(--grid);border-radius:8px;background:#0f1317;color:var(--ink);cursor:pointer}
+  .stepper .btn:hover{background:#101823}
+  .stepper .readout{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;width:100%;
+    border:1px solid var(--grid);border-radius:10px;background:#0f1317;padding:8px;min-height:0}
+  .stepper .val{font-weight:900;font-size:22px}
+  .stepper .val[contenteditable="true"]{outline:none;border-bottom:1px dashed var(--grid);padding:2px 6px;border-radius:6px}
+  .stepper .sub{font-size:11px;color:var(--muted);margin-top:2px}
+
   .seg{display:flex;border:1px solid var(--grid);border-radius:10px;overflow:hidden}
-  .seg button{flex:1;border:0;padding:8px 10px;background:#0f1317;color:var(--muted)}
+  .seg button{flex:1;border:0;padding:8px 10px;background:#0f1317;color:var(--muted);cursor:pointer}
   .seg button.active{background:#142033;color:var(--ink)}
   .seg button:not(:last-child){border-right:1px solid var(--grid)}
-  .play{width:100%;padding:12px 10px;border-radius:10px;font-weight:800}
-  .play.run{background:#15361f;border-color:#214d2b}
-  .play.pause{background:#3a1414;border-color:#612626}
+
+  /* Brighter Play/Pause */
+  .play{width:100%;padding:12px 10px;border-radius:10px;font-weight:800;border:1px solid var(--grid);cursor:pointer;transition:filter .12s ease}
+  .play.run{background:#1f8f44;border-color:#2aa456;box-shadow:0 0 0 1px rgba(42,164,86,.25) inset}
+  .play.pause{background:#a93636;border-color:#be4a4a;box-shadow:0 0 0 1px rgba(190,74,74,.25) inset}
+  .play:hover{filter:brightness(1.06)}
+  .play:disabled{opacity:0.6;cursor:not-allowed}
+
   .hint{font-size:11px;color:var(--muted)}
 
-  /* Responsive */
+  /* Responsive: stack columns on narrow screens */
   @media (max-width: 900px){
     .main{grid-template-columns:1fr}
+  }
+
+  /* Short displays: compress legends to save vertical space */
+  @media (max-height: 760px){
+    .legend{padding:2px 8px;font-size:10px}
+    .stripHead{padding:3px 8px}
+    .bp .main{font-size:34px}
   }
 </style>
 </head>
 <body>
   <!-- Top status bar -->
-  <div class="top">
+  <div class="top" id="topbar">
     <span class="pill">SSE: <b id="sse">INIT</b></span>
     <span class="pill">FPS: <b id="fps">—</b></span>
     <span class="pill">Hz: <b id="hz">—</b></span>
@@ -85,48 +134,48 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     <span class="pill">IP: <b id="ip">—</b></span>
   </div>
 
-  <!-- Main layout -->
-  <div class="main">
+  <!-- Main layout (height locked to viewport by JS) -->
+  <div class="main" id="main">
     <!-- LEFT: 5 strip charts -->
-    <div class="col">
-      <div class="card strip">
+    <div class="leftgrid">
+      <div class="strip">
         <div class="stripHead"><span>Atrium Pressure</span><span>mmHg</span></div>
         <div class="canvasWrap"><canvas id="cv-atr"></canvas></div>
         <div class="legend"><span class="sw" style="background:#0ea5e9"></span> −5 … 205 mmHg</div>
       </div>
-      <div class="card strip">
+      <div class="strip">
         <div class="stripHead"><span>Ventricle Pressure</span><span>mmHg</span></div>
         <div class="canvasWrap"><canvas id="cv-vent"></canvas></div>
         <div class="legend"><span class="sw" style="background:#ef4444"></span> −5 … 205 mmHg</div>
       </div>
-      <div class="card strip">
+      <div class="strip">
         <div class="stripHead"><span>Flow</span><span>mL/min</span></div>
         <div class="canvasWrap"><canvas id="cv-flow"></canvas></div>
         <div class="legend"><span class="sw" style="background:#f59e0b"></span> −500 … 500 mL/min</div>
       </div>
-      <div class="card strip">
+      <div class="strip">
         <div class="stripHead"><span>Valve Direction</span><span>0–100</span></div>
         <div class="canvasWrap"><canvas id="cv-valve"></canvas></div>
         <div class="legend"><span class="sw" style="background:#22c55e"></span> 0 (REV) … 100 (FWD)</div>
       </div>
-      <div class="card strip">
-        <div class="stripHead"><span>Pump Power</span><span>%</span></div>
+      <div class="strip">
+        <div class="stripHead"><span>Pump (PWM scaled)</span><span>%</span></div>
         <div class="canvasWrap"><canvas id="cv-power"></canvas></div>
         <div class="legend"><span class="sw" style="background:#a78bfa"></span> 0 … 100 %</div>
       </div>
     </div>
 
-    <!-- MIDDLE: live numerics -->
-    <div class="col">
-      <div class="bigNum"><span class="val" id="n-atr">—</span><span class="unit">mmHg</span></div>
-      <div class="bigNum"><span class="val" id="n-vent">—</span><span class="unit">mmHg</span></div>
-      <div class="bigNum"><span class="val" id="n-flow">—</span><span class="unit">mL/min</span></div>
-      <div class="bigNum"><span class="val" id="n-valve">—</span><span class="unit">/100</span></div>
-      <div class="bigNum"><span class="val" id="n-power">—</span><span class="unit">%</span></div>
+    <!-- MIDDLE: 5 numeric tiles -->
+    <div class="midgrid">
+      <div class="bigNum t-cyan"><div class="numStack"><span class="val" id="n-atr">—</span><span class="unit">mmHg</span></div></div>
+      <div class="bigNum t-red"><div class="numStack"><span class="val" id="n-vent">—</span><span class="unit">mmHg</span></div></div>
+      <div class="bigNum t-amber"><div class="numStack"><span class="val" id="n-flow">—</span><span class="unit">mL/min</span></div></div>
+      <div class="bigNum t-green"><div class="numStack"><span class="val" id="n-valve">—</span><span class="unit">/100</span></div></div>
+      <div class="bigNum t-violet"><div class="numStack"><span class="val" id="n-power">—</span><span class="unit">%</span></div></div>
     </div>
 
     <!-- RIGHT: controls -->
-    <div class="col controls">
+    <div class="controls">
       <div class="group">
         <h3>Blood Pressure</h3>
         <div class="bp">
@@ -138,19 +187,27 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 
       <div class="group">
         <h3>Heartbeat</h3>
-        <div class="row" style="margin-bottom:6px">
-          <span class="pill">BPM: <b id="bpmLabel">—</b></span>
+        <div class="stepper" id="stpBpm">
+          <button class="btn" data-dir="up">▲</button>
+          <div class="readout">
+            <div class="val" id="bpmLabel" contenteditable="true" spellcheck="false">—</div>
+            <div class="sub">BPM (1–60)</div>
+          </div>
+          <button class="btn" data-dir="down">▼</button>
         </div>
-        <input id="rngBpm" type="range" min="0.5" max="60" step="0.1">
-        <div class="hint">Stops: 0.5, 1, 2, 5, 10, 20, 40, 60</div>
+        <div class="hint">Click the number to type. Enter or blur to apply.</div>
       </div>
 
       <div class="group">
         <h3>Pump Power</h3>
-        <div class="row" style="margin-bottom:6px">
-          <span class="pill">Power: <b id="powerLabel">—%</b></span>
+        <div class="stepper" id="stpPower">
+          <button class="btn" data-dir="up">▲</button>
+          <div class="readout">
+            <div class="val" id="powerLabel" contenteditable="true" spellcheck="false">—%</div>
+            <div class="sub">Setpoint 10–100%</div>
+          </div>
+          <button class="btn" data-dir="down">▼</button>
         </div>
-        <input id="rngPower" type="range" min="10" max="100" step="1">
       </div>
 
       <div class="group">
@@ -169,15 +226,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
 
       <div class="group">
         <h3>Shortcuts</h3>
-        <div class="hint">Space: Play/Pause • 1/2/3: Mode • ←/→: Power −/+10 • ↑/↓: BPM stops</div>
+        <div class="hint">Space: Play/Pause • 1/2/3: Mode • ←/→: Power −/+1 • ↑/↓: BPM −/+1</div>
       </div>
     </div>
   </div>
 
 <script>
-/* -------------------- Status bar basics -------------------- */
+/* ------------- Layout: lock grid to viewport height ------------- */
 const $ = (id)=>document.getElementById(id);
 $('ip').textContent = location.host || '192.168.4.1';
+
+function fitLayout(){
+  const topH = document.getElementById('topbar').getBoundingClientRect().height || 0;
+  const main = document.getElementById('main');
+  main.style.height = Math.max(300, window.innerHeight - topH - 10) + 'px';
+}
+addEventListener('resize', fitLayout);
+addEventListener('load', fitLayout);
 
 /* -------------------- Canvas helpers -------------------- */
 function fitCanvas(canvas, ctx){
@@ -187,7 +252,7 @@ function fitCanvas(canvas, ctx){
   const W = Math.floor(cssW * dpr), H = Math.floor(cssH * dpr);
   if (canvas.width !== W || canvas.height !== H){
     canvas.width = W; canvas.height = H;
-    ctx.setTransform(dpr,0,0,dpr,0,0); // draw using CSS pixels
+    ctx.setTransform(dpr,0,0,dpr,0,0);
   }
 }
 function drawGrid(ctx, w, h, v=5, hlines=4){
@@ -203,13 +268,13 @@ function drawGrid(ctx, w, h, v=5, hlines=4){
 }
 
 /* -------------------- Strip chart factory -------------------- */
-const WINDOW_SEC = 5.0;    // 5-second sweep
-const CAP = 150;           // ~30 Hz * 5 s
+const WINDOW_SEC = 5.0;
 
 function makeStrip(canvasId, {min,max,color}){
   const cv = $(canvasId);
   const ctx = cv.getContext('2d');
   const buf = []; // {t,v}
+
   function push(v){
     const now = performance.now()/1000;
     buf.push({t:now, v});
@@ -227,30 +292,20 @@ function makeStrip(canvasId, {min,max,color}){
     const Y = (val)=> H - ( (val - min) / (max - min) ) * H;
     const X = (t)=> ((t % WINDOW_SEC) / WINDOW_SEC) * W;
 
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = color;
-
+    ctx.lineWidth = 2; ctx.strokeStyle = color;
     for (let i=1;i<buf.length;i++){
       const a = buf[i-1], b = buf[i];
       const xa = X(a.t), xb = X(b.t);
-      // skip wrap jump
-      if (xb < xa && (xa - xb) > (W*0.2)) continue;
-
-      // Age-based alpha (quadratic)
-      const age = tNow - b.t;
-      let alpha = 1 - (age / WINDOW_SEC);
+      if (xb < xa && (xa - xb) > (W*0.2)) continue; // skip wrap jump
+      let alpha = 1 - ((tNow - b.t) / WINDOW_SEC);
       if (alpha <= 0) continue;
-      alpha *= alpha;
+      alpha *= alpha; // quadratic fade
       ctx.globalAlpha = alpha;
-
-      ctx.beginPath();
-      ctx.moveTo(xa, Y(a.v));
-      ctx.lineTo(xb, Y(b.v));
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(xa, Y(a.v)); ctx.lineTo(xb, Y(b.v)); ctx.stroke();
     }
     ctx.globalAlpha = 1;
   }
-  window.addEventListener('resize', render);
+  addEventListener('resize', render);
   return {push, render, buf};
 }
 
@@ -259,14 +314,13 @@ const stripAtr   = makeStrip('cv-atr',   {min:-5,   max:205,  color:'#0ea5e9'});
 const stripVent  = makeStrip('cv-vent',  {min:-5,   max:205,  color:'#ef4444'});
 const stripFlow  = makeStrip('cv-flow',  {min:-500, max:500,  color:'#f59e0b'});
 const stripValve = makeStrip('cv-valve', {min:0,    max:100,  color:'#22c55e'});
-const stripPower = makeStrip('cv-power', {min:0,    max:100,  color:'#a78bfa'});
+const stripPower = makeStrip('cv-power', {min:0,    max:100,  color:'#a78bfa'}); // ACTUAL PWM%
 
 /* -------------------- Live numerics + BP -------------------- */
 function setNum(id, v, fixed=1){ $(id).textContent = (v==null||isNaN(v))?'—':Number(v).toFixed(fixed); }
 function setText(id, s){ $(id).textContent = s; }
 
 function computeBP(){
-  // SYS/DIA = max/min of Ventricle over last 5s
   const b = stripVent.buf;
   if (!b.length){ setText('bp','—/—'); return; }
   let hi = -1e9, lo = 1e9;
@@ -274,104 +328,148 @@ function computeBP(){
   setText('bp', `${Math.round(hi)}/${Math.round(lo)}`);
 }
 
-/* -------------------- Controls wiring -------------------- */
-const bpmStops = [0.5,1,2,5,10,20,40,60];
-function snapBpm(x){
-  let best = bpmStops[0], d=1e9;
-  for (const s of bpmStops){ const dd=Math.abs(s-x); if (dd<d){ d=dd; best=s; } }
-  return best;
+/* -------------------- Controls -------------------- */
+let uiBpm = 10, uiPowerSet = 30;
+let editingBpm = false, editingPow = false;
+let ignoreSseUntil = 0;
+
+function clamp(v, lo, hi){ return Math.min(hi, Math.max(lo, v)); }
+function parseIntStrict(s){
+  const n = parseInt(String(s).trim().replace(/[^\d\-]/g,''),10);
+  return isNaN(n)? null : n;
 }
+
+function bpmApply(newVal){
+  const v = clamp(newVal|0, 1, 60);
+  uiBpm = v; $('bpmLabel').textContent = String(v);
+  fetch('/api/bpm?b='+v).catch(()=>{});
+}
+function powerApply(newVal){
+  const v = clamp(newVal|0, 10, 100);
+  uiPowerSet = v; $('powerLabel').textContent = v + '%';
+  fetch('/api/power?pct='+v).catch(()=>{});
+}
+function stepHold(buttonEl, fn){
+  let rpt=null;
+  const start=()=>{ fn(); rpt=setInterval(fn, 140); };
+  const stop =()=>{ if(rpt){clearInterval(rpt); rpt=null;} };
+  buttonEl.addEventListener('mousedown', start);
+  buttonEl.addEventListener('touchstart', (e)=>{ e.preventDefault(); start(); }, {passive:false});
+  ['mouseup','mouseleave','touchend','touchcancel'].forEach(ev=> buttonEl.addEventListener(ev, stop));
+}
+(function bindSteppers(){
+  const bpmUp = document.querySelector('#stpBpm [data-dir="up"]');
+  const bpmDn = document.querySelector('#stpBpm [data-dir="down"]');
+  const pUp   = document.querySelector('#stpPower [data-dir="up"]');
+  const pDn   = document.querySelector('#stpPower [data-dir="down"]');
+
+  stepHold(bpmUp, ()=> bpmApply(uiBpm + 1));
+  stepHold(bpmDn, ()=> bpmApply(uiBpm - 1));
+  stepHold(pUp,   ()=> powerApply(uiPowerSet + 1));
+  stepHold(pDn,   ()=> powerApply(uiPowerSet - 1));
+
+  const bpmField = $('bpmLabel');
+  bpmField.addEventListener('focus', ()=> { editingBpm=true; });
+  bpmField.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); bpmField.blur(); }});
+  bpmField.addEventListener('blur', ()=>{
+    const n = parseIntStrict(bpmField.textContent);
+    if (n==null){ bpmField.textContent = String(uiBpm); editingBpm=false; return; }
+    editingBpm=false; bpmApply(n);
+  });
+
+  const pField = $('powerLabel');
+  pField.addEventListener('focus', ()=> { editingPow=true; });
+  pField.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); pField.blur(); }});
+  pField.addEventListener('blur', ()=>{
+    const n = parseIntStrict(pField.textContent);
+    if (n==null){ pField.textContent = uiPowerSet + '%'; editingPow=false; return; }
+    editingPow=false; powerApply(n);
+  });
+})();
+
+// Mode segmented buttons
 function setModeButtons(m){
   document.querySelectorAll('#modeSeg button').forEach(b=>{
     b.classList.toggle('active', Number(b.dataset.m)===m);
   });
 }
-function send(url){ fetch(url).catch(()=>{}); }
-
-$('btnPause').onclick = ()=> send('/api/toggle');
-
 document.querySelectorAll('#modeSeg button').forEach(btn=>{
   btn.addEventListener('click', ()=>{
     const m = Number(btn.dataset.m)||0;
     setModeButtons(m);
-    send('/api/mode?m='+m);
+    fetch('/api/mode?m='+m).catch(()=>{});
   });
 });
 
-$('rngPower').addEventListener('input', ()=>{
-  $('powerLabel').textContent = $('rngPower').value+'%';
-});
-$('rngPower').addEventListener('change', ()=>{
-  const v = Number($('rngPower').value)|0;
-  send('/api/power?pct='+v);
-});
-
-$('rngBpm').addEventListener('input', ()=>{
-  const raw = Number($('rngBpm').value);
-  const s = snapBpm(raw);
-  $('rngBpm').value = String(s);
-  $('bpmLabel').textContent = s.toFixed(1);
-});
-$('rngBpm').addEventListener('change', ()=>{
-  const v = Number($('rngBpm').value);
-  send('/api/bpm?b='+v);
-});
+// Play/Pause (brighter + anti-flicker)
+$('btnPause').onclick = ()=>{
+  const btn = $('btnPause');
+  const willPause = !btn.classList.contains('pause');
+  btn.disabled = true;
+  btn.classList.toggle('run',  !willPause);
+  btn.classList.toggle('pause', willPause);
+  btn.textContent = willPause ? 'Play' : 'Pause';
+  ignoreSseUntil = performance.now() + 400;
+  fetch('/api/toggle').finally(()=> setTimeout(()=>btn.disabled=false, 250));
+};
 
 /* Keyboard shortcuts */
-window.addEventListener('keydown', (e)=>{
-  if (e.code==='Space'){ e.preventDefault(); send('/api/toggle'); return; }
-  if (e.key==='1'){ send('/api/mode?m=0'); return; }
-  if (e.key==='2'){ send('/api/mode?m=1'); return; }
-  if (e.key==='3'){ send('/api/mode?m=2'); return; }
-
-  if (e.key==='ArrowLeft' || e.key==='ArrowRight'){
-    let cur = Number($('rngPower').value)|0;
-    let next = cur + (e.key==='ArrowRight'? +10 : -10);
-    if (next<10) next=10; if (next>100) next=100;
-    $('rngPower').value = String(next);
-    $('powerLabel').textContent = next+'%';
-    send('/api/power?pct='+next);
-  }
-  if (e.key==='ArrowUp' || e.key==='ArrowDown'){
-    const cur = Number($('rngBpm').value);
-    let idx = bpmStops.indexOf(snapBpm(cur));
-    idx += (e.key==='ArrowUp'? +1 : -1);
-    if (idx<0) idx=0; if (idx>=bpmStops.length) idx=bpmStops.length-1;
-    const v = bpmStops[idx];
-    $('rngBpm').value = String(v);
-    $('bpmLabel').textContent = v.toFixed(1);
-    send('/api/bpm?b='+v);
-  }
+addEventListener('keydown', (e)=>{
+  if (e.code==='Space'){ e.preventDefault(); $('btnPause').click(); return; }
+  if (e.key==='1'){ fetch('/api/mode?m=0'); return; }
+  if (e.key==='2'){ fetch('/api/mode?m=1'); return; }
+  if (e.key==='3'){ fetch('/api/mode?m=2'); return; }
+  if (e.key==='ArrowLeft'){ powerApply(uiPowerSet - 1); return; }
+  if (e.key==='ArrowRight'){ powerApply(uiPowerSet + 1); return; }
+  if (e.key==='ArrowUp'){ bpmApply(uiBpm + 1); return; }
+  if (e.key==='ArrowDown'){ bpmApply(uiBpm - 1); return; }
 });
 
 /* -------------------- SSE hookup -------------------- */
 const es = new EventSource('/stream');
 let lastFrame = performance.now(), emaFPS = 0;
+
 es.onopen  = ()=>{ $('sse').textContent='OPEN'; };
 es.onerror = ()=>{ $('sse').textContent='ERROR'; };
+
 es.onmessage = (ev)=>{
-  // FPS calc (browser-side)
+  // Stable FPS
   const now = performance.now(), dt = now - lastFrame; lastFrame = now;
-  const fps = 1000/Math.max(1,dt); emaFPS = emaFPS ? (emaFPS*0.9 + fps*0.1) : fps;
-  $('fps').textContent = emaFPS.toFixed(1);
+  const fps = 1000/Math.max(1,dt);
+  emaFPS = emaFPS ? (emaFPS*0.98 + fps*0.02) : fps;
+  $('fps').textContent = Math.round(emaFPS).toString();
 
   try{
     const d = JSON.parse(ev.data);
 
-    // Push values into strips
+    // Mirror setpoints (don’t overwrite while user is editing)
+    if (!editingPow && typeof d.powerPct === 'number'){
+      uiPowerSet = d.powerPct|0; $('powerLabel').textContent = uiPowerSet + '%';
+    }
+    if (!editingBpm && typeof d.bpm === 'number'){
+      let b = Math.round(Number(d.bpm)||0);
+      b = clamp(b,1,60);
+      uiBpm = b; $('bpmLabel').textContent = String(b);
+    }
+
+    // Strip values
     const valvePct = d.valve ? 100 : 0;
     stripAtr.push( Number(d.atr_mmHg)   || 0 );
     stripVent.push(Number(d.vent_mmHg)  || 0 );
     stripFlow.push(Number(d.flow_ml_min)|| 0 );
     stripValve.push(valvePct);
-    stripPower.push(Number(d.powerPct)  || 0 );
+
+    // Power strip uses ACTUAL PWM% (fallback to powerPct)
+    let pwmPct = null;
+    if (typeof d.pwm === 'number'){ pwmPct = clamp(Math.round((d.pwm/255)*100), 0, 100); }
+    stripPower.push( (pwmPct!=null)? pwmPct : (Number(d.powerPct)||0) );
 
     // Middle numerics
     setNum('n-atr',   d.atr_mmHg,1);
     setNum('n-vent',  d.vent_mmHg,1);
     setNum('n-flow',  d.flow_ml_min,1);
     $('n-valve').textContent = valvePct.toFixed(0);
-    setNum('n-power', d.powerPct,0);
+    $('n-power').textContent = (pwmPct!=null? pwmPct : (Number(d.powerPct)||0));
 
     // BP from ventricle buffer
     computeBP();
@@ -383,32 +481,20 @@ es.onmessage = (ev)=>{
       $('loop').textContent = loopMs.toFixed(2)+' ms';
     }
 
-    // Reflect controls from device state
+    // Mode & pause (ignore brief flicker window after click)
     setModeButtons(Number(d.mode)||0);
-
-    const p = Number(d.powerPct)||0;
-    if (Math.abs(Number($('rngPower').value)-p) >= 1){
-      $('rngPower').value = String(p);
-      $('powerLabel').textContent = p+'%';
+    if (performance.now() > ignoreSseUntil){
+      const paused = !!d.paused;
+      const btn = $('btnPause');
+      btn.classList.toggle('run',  !paused);
+      btn.classList.toggle('pause', paused);
+      btn.textContent = paused ? 'Play' : 'Pause';
     }
-    const b = Number(d.bpm)||0;
-    const s = snapBpm(b);
-    if (Math.abs(Number($('rngBpm').value)-s) > 0.0001){
-      $('rngBpm').value = String(s);
-      $('bpmLabel').textContent = s.toFixed(1);
-    }
-
-    const paused = !!d.paused;
-    const btn = $('btnPause');
-    btn.classList.toggle('run',  !paused);
-    btn.classList.toggle('pause', paused);
-    btn.textContent = paused ? 'Play' : 'Pause';
-
   }catch(e){}
 };
 
-// First paint on load/resize
-window.addEventListener('load', ()=>{
+// Initial paints
+addEventListener('load', ()=>{
   stripAtr.render(); stripVent.render(); stripFlow.render(); stripValve.render(); stripPower.render();
 });
 </script>
