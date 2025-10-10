@@ -169,6 +169,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
         <div class="canvasWrap"><canvas id="cv-power"></canvas></div>
         <div class="legend"><span class="sw" style="background:#a78bfa"></span> PWM floor … 255</div>
       </div>
+
     </div>
 
     <!-- MIDDLE: 5 numeric tiles -->
@@ -311,52 +312,106 @@ const WINDOW_SEC = 5.0;
 const PWM_FLOOR = 165; /* must match firmware floor */
 let lastPwm = PWM_FLOOR;
 
-function makeStrip(canvasId, {min,max,color}){
+function makeStrip(canvasId, cfg){
   const cv = $(canvasId), ctx = cv.getContext('2d');
+
+  // live state (editable later)
+  const st = {
+    min:  (cfg && cfg.min  != null) ? cfg.min  : 0,
+    max:  (cfg && cfg.max  != null) ? cfg.max  : 1,
+    color:(cfg && cfg.color) || '#fff',
+    auto: !!(cfg && cfg.auto),
+    pad:  (cfg && cfg.pad  != null) ? cfg.pad  : 0.10,
+    softMin: (cfg && cfg.softMin != null) ? cfg.softMin : -Infinity,
+    softMax: (cfg && cfg.softMax != null) ? cfg.softMax :  Infinity,
+  };
+
   const buf = []; // {t,v}
-  function push(v){
-    const now = performance.now()/1000;
-    buf.push({t:now,v});
-    while(buf.length && now - buf[0].t > WINDOW_SEC) buf.shift();
+
+  function setRange(min, max){
+    st.min = Number(min);
+    st.max = Number(max);
+    st.auto = false;
     render();
   }
+  function setAuto(on=true, pad=st.pad){
+    st.auto = !!on; st.pad = pad;
+    render();
+  }
+
+  function currentRange(){
+    if (!st.auto || buf.length < 2) return {yMin: st.min, yMax: st.max};
+    let lo = Infinity, hi = -Infinity;
+    for (const p of buf){ const v = p.v; if (v < lo) lo = v; if (v > hi) hi = v; }
+    if (!isFinite(lo) || !isFinite(hi) || lo === hi){
+      return {yMin: st.min, yMax: st.max};
+    }
+    const span = hi - lo, pad = span * st.pad;
+    let yMin = Math.max(st.softMin, lo - pad);
+    let yMax = Math.min(st.softMax, hi + pad);
+    if (yMax <= yMin) yMax = yMin + 1;
+    return {yMin, yMax};
+  }
+
+  function push(v){
+    const now = performance.now()/1000;
+    buf.push({t: now, v});
+    while (buf.length && now - buf[0].t > WINDOW_SEC) buf.shift();
+    render();
+  }
+
   function render(){
+    // size + DPR
     fitCanvas(cv, ctx);
-    const W=cv.clientWidth, H=cv.clientHeight;
-    ctx.clearRect(0,0,W,H);
-    drawGrid(ctx,W,H,5,4);
-    if (buf.length<2) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = cv.width / dpr, H = cv.height / dpr;
+
+    // clear in backing store, then draw in CSS px
+    ctx.save(); ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,cv.width,cv.height);
+    ctx.restore(); ctx.setTransform(dpr,0,0,dpr,0,0);
+
+    drawGrid(ctx, W, H, 5, 4);
+    if (buf.length < 2) return;
+
+    const {yMin, yMax} = currentRange();
     const tNow = performance.now()/1000;
 
-    const yMin=min, yMax=max;
-    const Y = (val)=> {
+    const Y = (val)=>{
       const vv = Math.max(yMin, Math.min(yMax, val));
       return H - ((vv - yMin) / (yMax - yMin)) * H;
     };
-    const X = (t)=> ((t%WINDOW_SEC)/WINDOW_SEC)*W;
+    const X = (t)=> ((t % WINDOW_SEC) / WINDOW_SEC) * W;
 
-    ctx.lineWidth=2; ctx.strokeStyle=color;
-    for(let i=1;i<buf.length;i++){
-      const a=buf[i-1], b=buf[i];
-      const xa=X(a.t), xb=X(b.t);
-      if (xb<xa && (xa-xb) > (W*0.2)) continue; // skip wrap
+    ctx.lineWidth = 2; ctx.strokeStyle = st.color;
+
+    for (let i=1; i<buf.length; i++){
+      const a = buf[i-1], b = buf[i];
+      const xa = X(a.t),   xb = X(b.t);
+      if (xb < xa && (xa - xb) > (W * 0.2)) continue; // skip modulo wrap
       let alpha = 1 - ((tNow - b.t) / WINDOW_SEC);
-      if (alpha<=0) continue; alpha*=alpha;
-      ctx.globalAlpha=alpha; ctx.beginPath();
-      ctx.moveTo(xa, Y(a.v)); ctx.lineTo(xb, Y(b.v)); ctx.stroke();
+      if (alpha <= 0) continue; alpha *= alpha;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.moveTo(xa, Y(a.v));
+      ctx.lineTo(xb, Y(b.v));
+      ctx.stroke();
     }
-    ctx.globalAlpha=1;
+    ctx.globalAlpha = 1;
   }
+
   addEventListener('resize', render);
-  return {push, render, buf, min, max, color};
+
+  // return the strip with live setters + state
+  return { push, render, buf, setRange, setAuto, state: st };
 }
 
-/* Build strips with FIXED ranges */
-const stripAtr   = makeStrip('cv-atr',   {min:-5,   max:205,  color:'#0ea5e9'});
-const stripVent  = makeStrip('cv-vent',  {min:-5,   max:205,  color:'#ef4444'});
-const stripFlow  = makeStrip('cv-flow',  {min:0,    max:750,  color:'#f59e0b'});
-const stripValve = makeStrip('cv-valve', {min:-1.1,   max:1.1,    color:'#22c55e'});
-const stripPower = makeStrip('cv-power', {min:PWM_FLOOR-1, max:256, color:'#a78bfa'}); // RAW PWM
+// Replace your strip constructors with these for now:
+const stripAtr   = makeStrip('cv-atr',   {min: -1500, max: 800, color:'#0ea5e9'});
+const stripVent  = makeStrip('cv-vent',  {min: -1500, max: 800, color:'#ef4444'});
+const stripFlow  = makeStrip('cv-flow',  {min: -1500, max: 800, color:'#f59e0b'});
+const stripValve = makeStrip('cv-valve', {min:-2, max: 1.3, color:'#22c55e'});
+const stripPower = makeStrip('cv-power', {min: -450, max: 256, color:'#a78bfa'});
 
 /* ---------- Numerics & BP ---------- */
 function setNum(id, v, fixed=1){ $(id).textContent=(v==null||isNaN(v))?'—':Number(v).toFixed(fixed); }
