@@ -36,18 +36,21 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
   .pill b{color:var(--ink)}
 
   /* Main 3-col grid */
-  .main{
-    display:grid;gap:12px;padding:10px;
-    grid-template-columns:minmax(320px,1fr) minmax(96px,120px) minmax(260px,300px);
-    max-width:100vw;
-    height:calc(100vh - 40px);
-  }
+.main{
+display:grid; gap:12px; padding:10px;
+grid-template-columns:minmax(320px,1fr) minmax(96px,120px) minmax(260px,300px);
+height:calc(100vh - 40px);  /* top bar assumed 40px */
+max-width:100vw;
+}
 
-  /* Each column = 5 equal rows locked by JS */
-  .leftgrid, .midgrid, .rightgrid{
-    display:grid; grid-template-rows:repeat(5,1fr); gap:var(--gap);
-    min-height:0;
-  }
+.leftgrid, .midgrid, .rightgrid{
+display:grid;
+grid-template-rows: repeat(5, minmax(60px, 1fr));
+gap: var(--gap);
+min-height:0;
+}
+
+  .canvasWrap{ height:100%; min-height:0; } 
 
   /* Strips */
   .strip{
@@ -276,27 +279,22 @@ function fitLayout(){
   const availMainH = Math.max(300, window.innerHeight - topH - 10);
   main.style.height = availMainH + 'px';
 
-  const gap = 10, tracks = 5;
-  const rowH = Math.max(60, Math.floor((availMainH - gap*(tracks-1)) / tracks));
-  const tpl = `repeat(5, ${rowH}px)`;
-  left.style.gridTemplateRows  = tpl;
-  mid.style.gridTemplateRows   = tpl;
-  right.style.gridTemplateRows = tpl;
+
 }
-addEventListener('resize', fitLayout);
-addEventListener('load', fitLayout);
 
 /* ---------- Canvas helpers ---------- */
-function fitCanvas(canvas, ctx){
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = Math.max(1, canvas.clientWidth);
-  const cssH = Math.max(1, canvas.clientHeight);
-  const W = Math.floor(cssW * dpr), H = Math.floor(cssH * dpr);
-  if (canvas.width !== W || canvas.height !== H){
-    canvas.width = W; canvas.height = H;
-    ctx.setTransform(dpr,0,0,dpr,0,0);
+function fitCanvas(canvas, ctx){  // added this versions ---------------------------------------
+  // Size the backing-store to exactly the CSS box; no DPR scaling.
+  const cssW = Math.max(1, canvas.clientWidth|0);
+  const cssH = Math.max(1, canvas.clientHeight|0);
+  if (canvas.width !== cssW || canvas.height !== cssH){
+    canvas.width = cssW;
+    canvas.height = cssH;
   }
+  // Ensure identity transform every frame.
+  ctx.setTransform(1,0,0,1,0,0);
 }
+
 function drawGrid(ctx, w, h, v=5, hlines=4){
   ctx.save(); ctx.lineWidth=1;
   ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--grid').trim()||'#26303a';
@@ -360,45 +358,56 @@ function makeStrip(canvasId, cfg){
     render();
   }
 
-  function render(){
-    // size + DPR
-    fitCanvas(cv, ctx);
-    const dpr = window.devicePixelRatio || 1;
-    const W = cv.width / dpr, H = cv.height / dpr;
+function render(){
+  fitCanvas(cv, ctx);
 
-    // clear in backing store, then draw in CSS px
-    ctx.save(); ctx.setTransform(1,0,0,1,0,0);
-    ctx.clearRect(0,0,cv.width,cv.height);
-    ctx.restore(); ctx.setTransform(dpr,0,0,dpr,0,0);
+  // Use the canvas’s backing-store size directly (CSS px, 1:1)
+  const W = cv.width, H = cv.height;
 
-    drawGrid(ctx, W, H, 5, 4);
-    if (buf.length < 2) return;
+  // Full clear
+  ctx.clearRect(0,0,W,H);
 
-    const {yMin, yMax} = currentRange();
-    const tNow = performance.now()/1000;
+  // Grid
+  drawGrid(ctx, W, H, 5, 4);
 
-    const Y = (val)=>{
-      const vv = Math.max(yMin, Math.min(yMax, val));
-      return H - ((vv - yMin) / (yMax - yMin)) * H;
-    };
-    const X = (t)=> ((t % WINDOW_SEC) / WINDOW_SEC) * W;
+  if (buf.length < 2) return;
 
-    ctx.lineWidth = 2; ctx.strokeStyle = st.color;
+  // FIXED RANGE (no autoscale if st.auto is false)
+  const { yMin, yMax } = (!st.auto || buf.length < 2)
+    ? { yMin: st.min, yMax: st.max }
+    : currentRange(); // you can leave this branch; it won't be used when auto=false
 
-    for (let i=1; i<buf.length; i++){
-      const a = buf[i-1], b = buf[i];
-      const xa = X(a.t),   xb = X(b.t);
-      if (xb < xa && (xa - xb) > (W * 0.2)) continue; // skip modulo wrap
-      let alpha = 1 - ((tNow - b.t) / WINDOW_SEC);
-      if (alpha <= 0) continue; alpha *= alpha;
-      ctx.globalAlpha = alpha;
-      ctx.beginPath();
-      ctx.moveTo(xa, Y(a.v));
-      ctx.lineTo(xb, Y(b.v));
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
+  const tNow = performance.now()/1000;
+
+  const Y = (val)=>{
+    const vv = Math.max(yMin, Math.min(yMax, val));
+    return H - ((vv - yMin) / (yMax - yMin)) * H;
+  };
+  const X = (t)=> ((t % WINDOW_SEC) / WINDOW_SEC) * W;
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = st.color;
+
+  for (let i=1; i<buf.length; i++){
+    const a = buf[i-1], b = buf[i];
+    const xa = X(a.t), xb = X(b.t);
+    if (xb < xa && (xa - xb) > (W * 0.2)) continue; // skip modulo wrap
+    let alpha = 1 - ((tNow - b.t) / WINDOW_SEC);
+    if (alpha <= 0) continue; alpha *= alpha;
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.moveTo(xa, Y(a.v));
+    ctx.lineTo(xb, Y(b.v));
+    ctx.stroke();
   }
+  ctx.globalAlpha = 1;
+
+  // Optional tiny overlay so you can SEE what the painter is using
+  ctx.fillStyle = 'rgba(255,255,255,.6)';
+  ctx.font = '10px system-ui';
+  ctx.fillText(`Y=[${yMin}..${yMax}] H=${H}px`, 6, 12);
+}
+
 
   addEventListener('resize', render);
 
@@ -407,11 +416,11 @@ function makeStrip(canvasId, cfg){
 }
 
 // Replace your strip constructors with these for now:
-const stripAtr   = makeStrip('cv-atr',   {min: -1500, max: 800, color:'#0ea5e9'});
-const stripVent  = makeStrip('cv-vent',  {min: -1500, max: 800, color:'#ef4444'});
-const stripFlow  = makeStrip('cv-flow',  {min: -1500, max: 800, color:'#f59e0b'});
-const stripValve = makeStrip('cv-valve', {min:-2, max: 1.3, color:'#22c55e'});
-const stripPower = makeStrip('cv-power', {min: -450, max: 256, color:'#a78bfa'});
+const stripAtr   = makeStrip('cv-atr',   {min: 0, max: 800, color:'#0ea5e9'});
+const stripVent  = makeStrip('cv-vent',  {min: 0, max: 800, color:'#ef4444'});
+const stripFlow  = makeStrip('cv-flow',  {min: -0.1, max: 750, color:'#f59e0b'});
+const stripValve = makeStrip('cv-valve', {min:-0.1, max: 1.1, color:'#22c55e'});
+const stripPower = makeStrip('cv-power', {min: -1, max: 256, color:'#a78bfa'});
 
 /* ---------- Numerics & BP ---------- */
 function setNum(id, v, fixed=1){ $(id).textContent=(v==null||isNaN(v))?'—':Number(v).toFixed(fixed); }
