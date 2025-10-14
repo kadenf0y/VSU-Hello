@@ -764,11 +764,16 @@ static void sse_task(void*) {
     int    power  = G.powerPct.load(std::memory_order_relaxed);
     unsigned pwm  = G.pwm.load(std::memory_order_relaxed);
     unsigned valv = G.valve.load(std::memory_order_relaxed);
-    float  vent   = G.vent_mmHg.load(std::memory_order_relaxed);
-    float  atr    = G.atr_mmHg.load(std::memory_order_relaxed);
-    float  flow   = G.flow_ml_min.load(std::memory_order_relaxed);
     float  bpm    = G.bpm.load(std::memory_order_relaxed);
     float  loop   = G.loopMs.load(std::memory_order_relaxed);
+
+    float  vent_raw = G.vent_mmHg.load(std::memory_order_relaxed);
+    float  atr_raw  = G.atr_mmHg.load(std::memory_order_relaxed);
+    float  flow  = G.flow_ml_min.load(std::memory_order_relaxed);
+
+    // Apply per-channel calibration *only for streaming/UI*
+    float  vent = scale_vent(vent_raw);
+    float  atr  = scale_atrium(atr_raw);
 
     int n = snprintf(buf, sizeof(buf),
       "{\"paused\":%d,\"mode\":%d,\"powerPct\":%d,"

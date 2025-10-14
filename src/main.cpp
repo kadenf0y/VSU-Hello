@@ -4,7 +4,8 @@
 #include "io.h"
 #include "buttons.h"
 #include "control.h"
-#include "web.h"          // <— add this
+#include "web.h"        
+#include "flow.h"
 
 void setup() {
   Serial.begin(921600);
@@ -14,6 +15,8 @@ void setup() {
   shared_init();
   io_init();
   buttons_init();
+
+  flow_begin();
 
   control_start_task();   // core 1
   web_start();            // core 0

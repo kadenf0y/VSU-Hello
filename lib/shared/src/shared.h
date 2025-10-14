@@ -3,6 +3,7 @@
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include "app_config.h"
 
 /*
   Shared state & command queue, safe across cores/tasks.
@@ -41,6 +42,11 @@ struct Shared {
 
   // Control-loop performance
   std::atomic<float>  loopMs{2.0f};       // EMA of loop time in ms
+
+  // ==== Scaling helpers ====
+  inline float scale_atrium(float raw)   { return raw * CAL_ATR.gain  + CAL_ATR.offset; }
+  inline float scale_vent(float raw)     { return raw * CAL_VENT.gain + CAL_VENT.offset; }
+
 };
 
 extern Shared G;
