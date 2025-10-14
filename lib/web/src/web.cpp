@@ -3,6 +3,7 @@
 #include <ESPAsyncWebServer.h>
 #include "app_config.h"
 #include "shared.h"
+#include "web_cal.h"
 
 // ====== Wi-Fi AP creds (same as your UNO build) ======
 static const char* AP_SSID = "VesaliusSimUse";
@@ -11,6 +12,40 @@ static const char* AP_PASS = "Vesal1us";
 // ====== Async web server and SSE source ======
 static AsyncWebServer server(80);
 static AsyncEventSource sse("/stream");
+
+// >>> ADD THIS — Calibration hooks used by web_cal.cpp
+
+// Return a SINGLE current sample for each channel. For now we use the live
+// atomics G.atr_mmHg and G.vent_mmHg that you already stream out.
+// (If later you expose true RAW sensor units, just change these two bodies.)
+static float readAtrRawOnce_impl(){
+  return G.atr_mmHg.load(std::memory_order_relaxed);
+}
+static float readVentRawOnce_impl(){
+  return G.vent_mmHg.load(std::memory_order_relaxed);
+}
+
+// If you maintain a 3-state valve internally, map it here.
+// Your SSE currently sends G.valve as an unsigned 0/1, so we’ll return 0/1.
+static int getValveDir_impl(){
+  unsigned v = G.valve.load(std::memory_order_relaxed); // 0 or 1 today
+  return (v > 0) ? 1 : 0;
+}
+
+// Direct manual valve override for calibration page.
+// Your firmware presently treats valve as 0/1; we’ll coerce:
+//  dir > 0 -> 1 (FWD), else -> 0 (NEUT/REV collapse).
+static void setValveDir_impl(int dir){
+  unsigned v = (dir > 0) ? 1u : 0u;
+  G.valve.store(v, std::memory_order_relaxed);
+}
+
+// Direct manual PWM override for calibration page (0..255).
+// This bypasses the % power setpoint so you can trim at raw duty.
+static void setPwmRaw_impl(uint8_t pwm){
+  G.pwm.store((unsigned)pwm, std::memory_order_relaxed);
+}
+
 
 // ====== Minimal dark UI (you’ll recognize the vibe; charts later) ======
 static const char INDEX_HTML[] PROGMEM = R"HTML(
@@ -806,6 +841,18 @@ void web_start() {
 
   // Allow simple cross-origin fetch from phones if needed
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+
+    // >>> ADD THIS — hand hooks to calibration module
+  web_cal_set_hooks({
+    readAtrRawOnce_impl,
+    readVentRawOnce_impl,
+    getValveDir_impl,
+    setValveDir_impl,
+    setPwmRaw_impl
+  });
+
+  // >>> ADD THIS — expose /cal page + /api/cal/* endpoints
+  web_cal_register_routes(server);
 
   server.begin();
 
